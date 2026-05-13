@@ -1,0 +1,64 @@
+# ========================
+# SECRETS & ENVIRONMENT
+# ========================
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.secret
+
+# ========================
+# PYTHON / BACKEND
+# ========================
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+backend/**/*.pyd
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.log
+
+# ========================
+# NODE / FRONTEND
+# ========================
+frontend/node_modules/
+frontend/.cache/
+frontend/dist/
+frontend/build/
+node_modules/
+
+# ========================
+# VITE / BUILD ARTIFACTS
+# ========================
+*.local
+dist-ssr/
+
+# ========================
+# OS FILES
+# ========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========================
+# EDITORS
+# ========================
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
