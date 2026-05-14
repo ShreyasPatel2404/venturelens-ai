@@ -2,11 +2,15 @@
 # SECRETS & ENVIRONMENT
 # ========================
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+backend/.env
+frontend/.env
 *.key
 *.pem
 *.secret
+credentials.json
+service-account*.json
 
 # ========================
 # PYTHON / BACKEND
