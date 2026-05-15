@@ -1,9 +1,9 @@
 // frontend/src/pages/Home.jsx
-// Fixed: WS opens first → onReady fires → HTTP /analyze starts
-// This prevents the "WebSocket connection lost" race condition.
+// DAY 4: Adds ReportViewer modal + copy scores to clipboard
 import { useState, useRef, useCallback } from "react";
 import { analyzeStartup, makeSessionId } from "../api/analyze";
 import ProgressTracker from "../components/ProgressTracker";
+import ReportViewer from "../components/ReportViewer";
 
 const INDUSTRIES = [
   "Fintech", "HealthTech", "EdTech", "SaaS", "E-commerce", "AI/ML",
@@ -19,13 +19,13 @@ const STAGES = [
 ];
 
 const VERDICT_CONFIG = {
-  "STRONG BUY": { color: "text-emerald-400",  bg: "bg-emerald-950 border-emerald-500", dot: "bg-emerald-400" },
-  "BUY":        { color: "text-emerald-300",  bg: "bg-emerald-950 border-emerald-600", dot: "bg-emerald-300" },
-  "PROMISING":  { color: "text-amber-300",    bg: "bg-amber-950 border-amber-500",     dot: "bg-amber-300" },
-  "HOLD":       { color: "text-yellow-400",   bg: "bg-yellow-950 border-yellow-600",   dot: "bg-yellow-400" },
-  "NEUTRAL":    { color: "text-gray-300",     bg: "bg-gray-800 border-gray-600",       dot: "bg-gray-300" },
-  "RISKY":      { color: "text-orange-400",   bg: "bg-orange-950 border-orange-500",   dot: "bg-orange-400" },
-  "PASS":       { color: "text-red-400",      bg: "bg-red-950 border-red-500",         dot: "bg-red-400" },
+  "STRONG BUY": { color: "text-emerald-400", bg: "bg-emerald-950 border-emerald-500", dot: "bg-emerald-400" },
+  "BUY":        { color: "text-emerald-300", bg: "bg-emerald-950 border-emerald-600", dot: "bg-emerald-300" },
+  "PROMISING":  { color: "text-amber-300",   bg: "bg-amber-950 border-amber-500",     dot: "bg-amber-300" },
+  "HOLD":       { color: "text-yellow-400",  bg: "bg-yellow-950 border-yellow-600",   dot: "bg-yellow-400" },
+  "NEUTRAL":    { color: "text-gray-300",    bg: "bg-gray-800 border-gray-600",       dot: "bg-gray-300" },
+  "RISKY":      { color: "text-orange-400",  bg: "bg-orange-950 border-orange-500",   dot: "bg-orange-400" },
+  "PASS":       { color: "text-red-400",     bg: "bg-red-950 border-red-500",         dot: "bg-red-400" },
 };
 
 const SCORE_LABELS = {
@@ -41,19 +41,13 @@ function ScoreRing({ score }) {
   const circ = 2 * Math.PI * r;
   const offset = circ - (score / 100) * circ;
   const color = score >= 75 ? "#34d399" : score >= 50 ? "#fbbf24" : "#f87171";
-
   return (
     <div className="relative w-36 h-36 mx-auto">
       <svg className="w-full h-full -rotate-90" viewBox="0 0 120 120">
         <circle cx="60" cy="60" r={r} fill="none" stroke="#1f2937" strokeWidth="10" />
-        <circle
-          cx="60" cy="60" r={r} fill="none"
-          stroke={color} strokeWidth="10"
-          strokeDasharray={circ}
-          strokeDashoffset={offset}
-          strokeLinecap="round"
-          style={{ transition: "stroke-dashoffset 1s ease" }}
-        />
+        <circle cx="60" cy="60" r={r} fill="none" stroke={color} strokeWidth="10"
+          strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+          style={{ transition: "stroke-dashoffset 1s ease" }} />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
         <span className="text-4xl font-bold text-white font-mono">{score}</span>
@@ -74,10 +68,8 @@ function ScoreBar({ label, value }) {
         <span className="text-white font-mono font-semibold">{value}</span>
       </div>
       <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-        <div
-          className={`h-full bg-gradient-to-r ${color} rounded-full transition-all duration-1000`}
-          style={{ width: `${value}%` }}
-        />
+        <div className={`h-full bg-gradient-to-r ${color} rounded-full transition-all duration-1000`}
+          style={{ width: `${value}%` }} />
       </div>
     </div>
   );
@@ -85,62 +77,65 @@ function ScoreBar({ label, value }) {
 
 export default function Home() {
   const [form, setForm] = useState({
-    startup_name: "",
-    industry: "Fintech",
-    stage: "seed",
-    description: "",
+    startup_name: "", industry: "Fintech", stage: "seed", description: "",
   });
-  const [phase, setPhase]         = useState("idle");
-  const [result, setResult]       = useState(null);
-  const [errorMsg, setErrorMsg]   = useState("");
-  const [sessionId, setSessionId] = useState(null);
+  const [phase, setPhase]           = useState("idle");
+  const [result, setResult]         = useState(null);
+  const [errorMsg, setErrorMsg]     = useState("");
+  const [sessionId, setSessionId]   = useState(null);
+  const [showReport, setShowReport] = useState(false);
+  const [scoresCopied, setScoresCopied] = useState(false);
 
-  // Store form snapshot so onReady closure has access
-  const pendingForm = useRef(null);
+  const pendingForm      = useRef(null);
   const pendingSessionId = useRef(null);
-  const resultsRef = useRef(null);
+  const resultsRef       = useRef(null);
 
-  // Called by form submit — switches to loading and creates session,
-  // but does NOT call /analyze yet (WS must open first)
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!form.startup_name.trim() || !form.description.trim()) return;
-
     const sid = makeSessionId();
     pendingForm.current = { ...form };
     pendingSessionId.current = sid;
-
-    setResult(null);
-    setErrorMsg("");
-    setSessionId(sid);    // mounts ProgressTracker → opens WS → fires onReady
-    setPhase("loading");
+    setResult(null); setErrorMsg(""); setSessionId(sid); setPhase("loading");
   };
 
-  // Called by ProgressTracker once WS.onopen fires — NOW safe to call /analyze
   const handleWsReady = useCallback(async () => {
     const sid  = pendingSessionId.current;
     const data = pendingForm.current;
     if (!sid || !data) return;
-
     try {
       const res = await analyzeStartup(data, sid);
-      setResult(res);
-      setPhase("done");
+      setResult(res); setPhase("done");
       setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     } catch (err) {
-      setErrorMsg(err.message);
-      setPhase("error");
+      setErrorMsg(err.message); setPhase("error");
     }
   }, []);
 
   const handleReset = () => {
-    setPhase("idle");
-    setResult(null);
-    setErrorMsg("");
-    setSessionId(null);
-    pendingForm.current = null;
-    pendingSessionId.current = null;
+    setPhase("idle"); setResult(null); setErrorMsg("");
+    setSessionId(null); setShowReport(false);
+    pendingForm.current = null; pendingSessionId.current = null;
   };
+
+  const handleCopyScores = useCallback(() => {
+    if (!result) return;
+    const text = [
+      `VentureLens AI — ${result.startup_name}`,
+      `Overall Score: ${result.overall_score}/100`,
+      `Verdict: ${result.verdict}`,
+      ``,
+      ...Object.entries(result.scores || {}).map(
+        ([k, v]) => `${SCORE_LABELS[k] || k}: ${v}`
+      ),
+      ``,
+      `Summary: ${result.summary}`,
+    ].join("\n");
+    navigator.clipboard.writeText(text).then(() => {
+      setScoresCopied(true);
+      setTimeout(() => setScoresCopied(false), 2000);
+    });
+  }, [result]);
 
   const vc = result ? (VERDICT_CONFIG[result.verdict] || VERDICT_CONFIG["NEUTRAL"]) : null;
 
@@ -164,14 +159,13 @@ export default function Home() {
 
       <main className="max-w-3xl mx-auto px-6 py-12">
 
-        {/* ── IDLE: Input Form ── */}
+        {/* ── IDLE ── */}
         {phase === "idle" && (
           <div>
             <div className="mb-10 text-center">
               <p className="text-xs text-amber-400 tracking-[0.3em] mb-3">INSTITUTIONAL-GRADE</p>
               <h1 className="text-4xl font-bold text-white leading-tight">
-                AI Due Diligence<br />
-                <span className="text-amber-400">in Minutes</span>
+                AI Due Diligence<br /><span className="text-amber-400">in Minutes</span>
               </h1>
               <p className="text-gray-400 mt-4 text-sm max-w-md mx-auto">
                 7-agent pipeline — company research, market analysis, financial modeling,
@@ -183,62 +177,46 @@ export default function Home() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2 space-y-1.5">
                   <label className="text-xs text-gray-400 tracking-widest">STARTUP NAME</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Stripe, NovaPay"
+                  <input type="text" placeholder="e.g. Stripe, NovaPay"
                     value={form.startup_name}
                     onChange={(e) => setForm({ ...form, startup_name: e.target.value })}
                     required
-                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-amber-400 transition-colors"
-                  />
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-amber-400 transition-colors" />
                 </div>
-
                 <div className="space-y-1.5">
                   <label className="text-xs text-gray-400 tracking-widest">INDUSTRY</label>
-                  <select
-                    value={form.industry}
+                  <select value={form.industry}
                     onChange={(e) => setForm({ ...form, industry: e.target.value })}
-                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-amber-400 transition-colors"
-                  >
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-amber-400 transition-colors">
                     {INDUSTRIES.map((i) => <option key={i}>{i}</option>)}
                   </select>
                 </div>
-
                 <div className="space-y-1.5">
                   <label className="text-xs text-gray-400 tracking-widest">STAGE</label>
-                  <select
-                    value={form.stage}
+                  <select value={form.stage}
                     onChange={(e) => setForm({ ...form, stage: e.target.value })}
-                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-amber-400 transition-colors"
-                  >
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-amber-400 transition-colors">
                     {STAGES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                   </select>
                 </div>
-
                 <div className="col-span-2 space-y-1.5">
                   <label className="text-xs text-gray-400 tracking-widest">DESCRIPTION</label>
-                  <textarea
-                    placeholder="Briefly describe the startup — product, target market, business model, traction..."
+                  <textarea placeholder="Briefly describe the startup — product, target market, business model, traction..."
                     value={form.description}
                     onChange={(e) => setForm({ ...form, description: e.target.value })}
-                    required
-                    rows={4}
-                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-amber-400 transition-colors resize-none"
-                  />
+                    required rows={4}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-amber-400 transition-colors resize-none" />
                 </div>
               </div>
-
-              <button
-                type="submit"
-                className="w-full bg-amber-400 hover:bg-amber-300 text-black font-bold py-4 rounded-lg tracking-widest text-sm transition-all duration-200 hover:shadow-lg hover:shadow-amber-400/20"
-              >
+              <button type="submit"
+                className="w-full bg-amber-400 hover:bg-amber-300 text-black font-bold py-4 rounded-lg tracking-widest text-sm transition-all duration-200 hover:shadow-lg hover:shadow-amber-400/20">
                 RUN DUE DILIGENCE →
               </button>
             </form>
           </div>
         )}
 
-        {/* ── LOADING: Live Progress ── */}
+        {/* ── LOADING ── */}
         {phase === "loading" && (
           <div>
             <div className="text-center mb-10">
@@ -268,10 +246,11 @@ export default function Home() {
           </div>
         )}
 
-        {/* ── DONE: Results Dashboard ── */}
+        {/* ── RESULTS ── */}
         {phase === "done" && result && (
           <div ref={resultsRef} className="space-y-6">
-            {/* Header */}
+
+            {/* Header row */}
             <div className="flex items-start justify-between flex-wrap gap-3">
               <div>
                 <p className="text-xs text-amber-400 tracking-[0.3em] mb-1">ANALYSIS COMPLETE</p>
@@ -284,7 +263,7 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Score ring + dimension bars */}
+            {/* Score ring + bars */}
             <div className="grid grid-cols-5 gap-6 bg-gray-900 rounded-xl p-6 border border-gray-800">
               <div className="col-span-2 flex flex-col items-center justify-center">
                 <ScoreRing score={result.overall_score} />
@@ -310,8 +289,7 @@ export default function Home() {
                 <ul className="space-y-2">
                   {(result.green_flags || []).map((f, i) => (
                     <li key={i} className="text-xs text-gray-300 flex gap-2">
-                      <span className="text-emerald-500 flex-shrink-0 mt-0.5">▸</span>
-                      <span>{f}</span>
+                      <span className="text-emerald-500 flex-shrink-0 mt-0.5">▸</span><span>{f}</span>
                     </li>
                   ))}
                 </ul>
@@ -321,12 +299,29 @@ export default function Home() {
                 <ul className="space-y-2">
                   {(result.red_flags || []).map((f, i) => (
                     <li key={i} className="text-xs text-gray-300 flex gap-2">
-                      <span className="text-red-500 flex-shrink-0 mt-0.5">▸</span>
-                      <span>{f}</span>
+                      <span className="text-red-500 flex-shrink-0 mt-0.5">▸</span><span>{f}</span>
                     </li>
                   ))}
                 </ul>
               </div>
+            </div>
+
+            {/* ── DAY 4: Action buttons ── */}
+            <div className="flex gap-3">
+              {/* View full report */}
+              <button
+                onClick={() => setShowReport(true)}
+                className="flex-1 bg-amber-400 hover:bg-amber-300 text-black font-bold py-3 rounded-lg text-sm tracking-widest transition-all"
+              >
+                📄 VIEW FULL REPORT
+              </button>
+              {/* Copy scores */}
+              <button
+                onClick={handleCopyScores}
+                className="px-5 py-3 border border-gray-700 hover:border-amber-400 text-gray-400 hover:text-amber-400 rounded-lg text-sm transition-all"
+              >
+                {scoresCopied ? "✓ Copied" : "⎘ Copy Scores"}
+              </button>
             </div>
 
             {/* Sources */}
@@ -348,6 +343,14 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      {/* ── Report Viewer Modal ── */}
+      {showReport && result && (
+        <ReportViewer
+          startupName={result.startup_name}
+          onClose={() => setShowReport(false)}
+        />
+      )}
     </div>
   );
 }

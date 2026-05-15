@@ -21,6 +21,8 @@ backend/**/__pycache__/
 backend/**/*.pyc
 backend/**/*.pyo
 backend/**/*.pyd
+backend/outputs/
+backend/copied_score
 *.pyc
 *.pyo
 *.pyd
