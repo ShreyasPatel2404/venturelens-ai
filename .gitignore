@@ -13,6 +13,13 @@ credentials.json
 service-account*.json
 
 # ========================
+# DATABASE FILES (runtime data)
+# ========================
+*.db
+*.sqlite
+*.sqlite3
+
+# ========================
 # PYTHON / BACKEND
 # ========================
 backend/venv/
