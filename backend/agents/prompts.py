@@ -169,3 +169,62 @@ product_differentiation 20%, traction 20%, financial_health 15%.
 
 Output ONLY valid JSON. No markdown fences, no explanation.
 """
+# ── DAY 6: Competitor Analysis Prompt ─────────────────────────────────────────
+COMPETITOR_ANALYSIS_PROMPT = """You are a competitive intelligence analyst.
+
+COMPANY CONTEXT:
+{company_info}
+MARKET CONTEXT:
+{market_analysis}
+
+Use google_search to research the top 3 direct competitors of this company.
+
+For EACH competitor, find and return:
+- name: company name
+- founded: founding year
+- funding: total funding raised (e.g. "$500M Series C")
+- revenue_est: estimated annual revenue or ARR
+- team_size: approximate employee count
+- key_differentiator: their single strongest competitive advantage vs the analyzed company
+- website: company website URL
+
+Output ONLY a valid JSON array with exactly 3 objects. No markdown, no explanation.
+Example structure:
+[
+  {{
+    "name": "CompanyA",
+    "founded": "2015",
+    "funding": "$200M",
+    "revenue_est": "$50M ARR",
+    "team_size": "500",
+    "key_differentiator": "Better enterprise integrations",
+    "website": "https://companya.com"
+  }}
+]
+"""
+
+# ── DAY 6: Investment Thesis Generator Prompt ──────────────────────────────────
+THESIS_GENERATOR_PROMPT = """You are a senior investment partner writing a concise investment thesis.
+
+ANALYSIS DATA:
+Company: {startup_name}
+Overall Score: {overall_score}/100
+Verdict: {verdict}
+Summary: {summary}
+Green Flags: {green_flags}
+Red Flags: {red_flags}
+Scores: {scores}
+
+Write TWO sections, each exactly 100 words:
+
+**WHY INVEST:**
+Write a compelling bull case for investing. Focus on market opportunity, competitive moats,
+team quality, and growth trajectory. Be specific, not generic.
+
+**WHY NOT INVEST:**
+Write an honest bear case. Focus on real risks, valuation concerns, competitive threats,
+and execution challenges. Be direct and specific.
+
+Format as clean Markdown with the two bold headers above.
+Do NOT add any other text outside these two sections.
+"""

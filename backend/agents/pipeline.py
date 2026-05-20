@@ -2,6 +2,7 @@
 VentureLens AI — 7-Agent Due Diligence Pipeline
 Uses Google ADK SequentialAgent pattern.
 Now emits real-time WebSocket progress events after each agent completes.
+Auto-retries on 502/503 Google server errors (up to 3 attempts).
 """
 
 import asyncio
@@ -143,6 +144,7 @@ async def run_pipeline(
     """
     Runs the full 7-agent pipeline.
     If session_id provided, emits WebSocket progress events in real-time.
+    Auto-retries up to 3 times on 502/503 Google server errors.
     """
     from websocket_manager import manager
 
@@ -179,36 +181,64 @@ async def run_pipeline(
 
     seen_keys: set = set()
 
-    async for event in runner.run_async(
-        user_id=USER_ID,
-        session_id=adk_session.id,
-        new_message=types.Content(
-            role="user",
-            parts=[types.Part(text=user_message)],
-        ),
-    ):
-        # Poll session state after every event to detect newly completed stages
+    # ── Runner loop with 502/503 retry ────────────────────────────────────────
+    for attempt in range(3):
         try:
-            snap = await session_service.get_session(
-                app_name=APP_NAME,
+            async for event in runner.run_async(
                 user_id=USER_ID,
                 session_id=adk_session.id,
-            )
-            current_state = snap.state or {}
-        except Exception:
-            current_state = {}
+                new_message=types.Content(
+                    role="user",
+                    parts=[types.Part(text=user_message)],
+                ),
+            ):
+                # Poll session state after every event to detect newly completed stages
+                try:
+                    snap = await session_service.get_session(
+                        app_name=APP_NAME,
+                        user_id=USER_ID,
+                        session_id=adk_session.id,
+                    )
+                    current_state = snap.state or {}
+                except Exception:
+                    current_state = {}
 
-        for idx, (key, agent_name, msg) in enumerate(STAGES):
-            if key in current_state and key not in seen_keys:
-                seen_keys.add(key)
-                await emit(key, "done", f"{agent_name} complete")
-                logger.info(f"Stage done: {key}")
-                # Start next stage
-                if idx + 1 < len(STAGES):
-                    nk, _, nm = STAGES[idx + 1]
-                    await emit(nk, "running", nm)
+                for idx, (key, agent_name, msg) in enumerate(STAGES):
+                    if key in current_state and key not in seen_keys:
+                        seen_keys.add(key)
+                        await emit(key, "done", f"{agent_name} complete")
+                        logger.info(f"Stage done: {key}")
+                        if idx + 1 < len(STAGES):
+                            nk, _, nm = STAGES[idx + 1]
+                            await emit(nk, "running", nm)
 
-    # Read final state
+            # Success — exit retry loop
+            break
+
+        except Exception as e:
+            err_str = str(e)
+            is_retryable = "502" in err_str or "503" in err_str or "500" in err_str
+
+            if is_retryable and attempt < 2:
+                wait = 30 * (attempt + 1)   # 30s on first retry, 60s on second
+                logger.warning(
+                    f"Google server error (attempt {attempt + 1}/3). "
+                    f"Retrying in {wait}s... Error: {err_str[:120]}"
+                )
+                await emit(
+                    STAGES[0][0], "running",
+                    f"Server busy — retrying in {wait}s (attempt {attempt + 2}/3)..."
+                )
+                await asyncio.sleep(wait)
+                # Reset seen_keys so stage tracking works on retry
+                seen_keys = set()
+                await emit(STAGES[0][0], "running", STAGES[0][2])
+                continue
+
+            # Non-retryable error or out of attempts — re-raise
+            raise
+
+    # ── Read final state ───────────────────────────────────────────────────────
     try:
         final_snap = await session_service.get_session(
             app_name=APP_NAME,
