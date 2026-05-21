@@ -10,10 +10,15 @@ from collections import Counter
 from models import AnalyzeRequest, AnalyzeResponse
 from agents import run_pipeline
 from websocket_manager import manager
-from auth import require_auth
+from auth import (
+    get_current_user, optional_user, CurrentUser,
+    UserCreate, UserLogin, TokenResponse,
+    hash_password, verify_password, create_access_token,
+)
 from services.db import (
     init_db, save_analysis, get_history, get_analysis_by_id,
-    engine, Analysis, Session, select
+    create_user, get_user_by_email, get_user_by_id,
+    engine, Analysis, Session, select,
 )
 from services.pdf_generator import generate_pdf
 from services.news_service import fetch_company_news
@@ -24,7 +29,7 @@ logger = logging.getLogger("VentureLens")
 
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
 
-app = FastAPI(title="VentureLens AI", version="0.7.0")
+app = FastAPI(title="VentureLens AI", version="0.8.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True,
@@ -34,41 +39,63 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     init_db()
-    try:
-        with engine.connect() as conn:
-            conn.execute(__import__("sqlalchemy").text(
-                "ALTER TABLE analyses ADD COLUMN share_token TEXT"))
-            conn.commit()
-    except Exception:
-        pass
     logger.info("Database initialized.")
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.7.0"}
+    return {"status": "ok", "version": "0.8.0"}
 
 
-# ── Metrics ────────────────────────────────────────────────────────────────────
-@app.get("/metrics")
-async def metrics():
-    """Returns total analyses, average score, and verdict distribution."""
-    rows = get_history(limit=1000)
-    if not rows:
-        return {"total": 0, "avg_score": 0, "verdict_distribution": {}, "top_industries": {}}
+# ── Auth Routes ────────────────────────────────────────────────────────────────
+@app.post("/auth/signup", response_model=TokenResponse)
+async def signup(body: UserCreate):
+    email = body.email.lower().strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email address.")
+    if len(body.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
 
-    total        = len(rows)
-    avg_score    = round(sum(r["overall_score"] for r in rows) / total, 1)
-    verdicts     = Counter(r["verdict"]   for r in rows)
-    industries   = Counter(r["industry"]  for r in rows)
+    existing = get_user_by_email(email)
+    if existing:
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
-    return {
-        "total":                total,
-        "avg_score":            avg_score,
-        "verdict_distribution": dict(verdicts.most_common()),
-        "top_industries":       dict(industries.most_common(5)),
-    }
+    user = create_user(
+        email         = email,
+        name          = body.name or email.split("@")[0],
+        password_hash = hash_password(body.password),
+    )
+    token = create_access_token(user["id"], user["email"])
+    logger.info(f"New user signed up: {email}")
+    return TokenResponse(
+        access_token = token,
+        user_id      = user["id"],
+        email        = user["email"],
+        name         = user["name"],
+    )
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(body: UserLogin):
+    email = body.email.lower().strip()
+    user  = get_user_by_email(email)
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    token = create_access_token(user["id"], user["email"])
+    logger.info(f"User logged in: {email}")
+    return TokenResponse(
+        access_token = token,
+        user_id      = user["id"],
+        email        = user["email"],
+        name         = user["name"],
+    )
+
+
+@app.get("/auth/me")
+async def me(current_user: CurrentUser = Depends(get_current_user)):
+    return {"id": current_user.id, "email": current_user.email, "name": current_user.name}
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────────────
@@ -85,9 +112,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
 
 # ── Analyze ────────────────────────────────────────────────────────────────────
-@app.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(require_auth)])
-async def analyze(request: AnalyzeRequest):
-    logger.info(f"Analyzing: {request.startup_name}")
+@app.post("/analyze", response_model=AnalyzeResponse)
+async def analyze(request: AnalyzeRequest,
+                  current_user: CurrentUser = Depends(get_current_user)):
+    logger.info(f"Analyzing: {request.startup_name} for user {current_user.id}")
     try:
         result = await run_pipeline(
             startup_name=request.startup_name, industry=request.industry,
@@ -102,9 +130,12 @@ async def analyze(request: AnalyzeRequest):
                              key=lambda f: f.stat().st_mtime, reverse=True)
             if matches:
                 report_file = str(matches[0])
-        analysis_id = save_analysis(result_for_db, report_file=report_file)
+
+        analysis_id = save_analysis(result_for_db, report_file=report_file,
+                                    user_id=current_user.id)
         if request.session_id:
-            await manager.broadcast_result(request.session_id, {**result, "analysis_id": analysis_id})
+            await manager.broadcast_result(request.session_id,
+                                           {**result, "analysis_id": analysis_id})
         return AnalyzeResponse(**result)
     except Exception as e:
         logger.error(f"Pipeline error: {e}", exc_info=True)
@@ -115,7 +146,8 @@ async def analyze(request: AnalyzeRequest):
 
 # ── Markdown report ────────────────────────────────────────────────────────────
 @app.get("/report/{startup_name}", response_class=PlainTextResponse)
-async def get_report_md(startup_name: str):
+async def get_report_md(startup_name: str,
+                        current_user: CurrentUser = Depends(get_current_user)):
     slug = re.sub(r"[^a-z0-9]+", "_", startup_name.lower()).strip("_")
     if not OUTPUTS_DIR.exists():
         raise HTTPException(status_code=404, detail="No reports found.")
@@ -128,8 +160,9 @@ async def get_report_md(startup_name: str):
 
 # ── PDF ────────────────────────────────────────────────────────────────────────
 @app.get("/report/{analysis_id}/pdf")
-async def get_report_pdf(analysis_id: int):
-    row = get_analysis_by_id(analysis_id)
+async def get_report_pdf(analysis_id: int,
+                         current_user: CurrentUser = Depends(get_current_user)):
+    row = get_analysis_by_id(analysis_id, user_id=current_user.id)
     if not row:
         raise HTTPException(status_code=404, detail="Analysis not found.")
     result   = row["result"]
@@ -142,26 +175,44 @@ async def get_report_pdf(analysis_id: int):
                     headers={"Content-Disposition": f'attachment; filename="{slug}_venturelens.pdf"'})
 
 
-# ── History ────────────────────────────────────────────────────────────────────
+# ── History (user-scoped) ──────────────────────────────────────────────────────
 @app.get("/history")
-async def history(limit: int = 50):
-    rows = get_history(limit=limit)
+async def history(limit: int = 50,
+                  current_user: CurrentUser = Depends(get_current_user)):
+    rows = get_history(limit=limit, user_id=current_user.id)
     return [{"id":r["id"],"startup_name":r["startup_name"],"industry":r["industry"],
              "stage":r["stage"],"overall_score":r["overall_score"],
              "verdict":r["verdict"],"created_at":r["created_at"]} for r in rows]
 
 @app.get("/history/{analysis_id}")
-async def history_detail(analysis_id: int):
-    row = get_analysis_by_id(analysis_id)
+async def history_detail(analysis_id: int,
+                         current_user: CurrentUser = Depends(get_current_user)):
+    row = get_analysis_by_id(analysis_id, user_id=current_user.id)
     if not row:
         raise HTTPException(status_code=404, detail="Analysis not found.")
     return row
 
 
+# ── Metrics ────────────────────────────────────────────────────────────────────
+@app.get("/metrics")
+async def metrics(current_user: CurrentUser = Depends(get_current_user)):
+    rows = get_history(limit=1000, user_id=current_user.id)
+    if not rows:
+        return {"total": 0, "avg_score": 0, "verdict_distribution": {}, "top_industries": {}}
+    total = len(rows)
+    return {
+        "total":                total,
+        "avg_score":            round(sum(r["overall_score"] for r in rows) / total, 1),
+        "verdict_distribution": dict(Counter(r["verdict"] for r in rows).most_common()),
+        "top_industries":       dict(Counter(r["industry"] for r in rows).most_common(5)),
+    }
+
+
 # ── Competitors ────────────────────────────────────────────────────────────────
 @app.get("/competitors/{analysis_id}")
-async def get_competitors(analysis_id: int):
-    row = get_analysis_by_id(analysis_id)
+async def get_competitors(analysis_id: int,
+                          current_user: CurrentUser = Depends(get_current_user)):
+    row = get_analysis_by_id(analysis_id, user_id=current_user.id)
     if not row:
         raise HTTPException(status_code=404, detail="Analysis not found.")
     try:
@@ -183,7 +234,8 @@ async def get_competitors(analysis_id: int):
 
 # ── News ───────────────────────────────────────────────────────────────────────
 @app.get("/news/{startup_name}")
-async def get_news(startup_name: str):
+async def get_news(startup_name: str,
+                   current_user: CurrentUser = Depends(get_current_user)):
     articles = await fetch_company_news(startup_name)
     return {"articles": articles}
 
@@ -193,8 +245,9 @@ class ThesisRequest(BaseModel):
     analysis_id: int
 
 @app.post("/thesis")
-async def generate_thesis(req: ThesisRequest):
-    row = get_analysis_by_id(req.analysis_id)
+async def generate_thesis(req: ThesisRequest,
+                          current_user: CurrentUser = Depends(get_current_user)):
+    row = get_analysis_by_id(req.analysis_id, user_id=current_user.id)
     if not row:
         raise HTTPException(status_code=404, detail="Analysis not found.")
     try:
@@ -220,8 +273,9 @@ async def generate_thesis(req: ThesisRequest):
 
 # ── Share ──────────────────────────────────────────────────────────────────────
 @app.post("/share/{analysis_id}")
-async def create_share_link(analysis_id: int):
-    row = get_analysis_by_id(analysis_id)
+async def create_share_link(analysis_id: int,
+                            current_user: CurrentUser = Depends(get_current_user)):
+    row = get_analysis_by_id(analysis_id, user_id=current_user.id)
     if not row:
         raise HTTPException(status_code=404, detail="Analysis not found.")
     token = str(uuid.uuid4())
@@ -234,6 +288,7 @@ async def create_share_link(analysis_id: int):
 
 @app.get("/share/{token}")
 async def get_shared_report(token: str):
+    """Public — no auth required for read-only shared reports."""
     with Session(engine) as session:
         row = session.execute(
             select(Analysis).where(Analysis.share_token == token)
@@ -242,3 +297,4 @@ async def get_shared_report(token: str):
             raise HTTPException(status_code=404, detail="Share link not found.")
         from services.db import _row_to_dict
         return _row_to_dict(row)
+    
